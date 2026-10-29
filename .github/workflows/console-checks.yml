@@ -1,0 +1,80 @@
+name: Console checks
+
+on:
+  push:
+  pull_request:
+    branches: [dev, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  console:
+    name: Compile and test navigation templates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    env:
+      CGO_ENABLED: '1'
+      GOOS: linux
+      GOFLAGS: -mod=readonly
+      GOSUMDB: sum.golang.org
+      GOTOOLCHAIN: local
+    steps:
+      - name: Check out source
+        id: checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Set up the declared Go version
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: false
+          cache: false
+
+      - name: Verify the exact Go version
+        run: |
+          declared_version=$(awk '$1 == "go" { print $2 }' go.mod)
+          actual_version=$(go env GOVERSION)
+          test "$actual_version" = "go${declared_version}"
+          go version
+
+      - name: Download and verify modules without changing manifests
+        run: |
+          go mod download
+          go mod verify
+          git diff --exit-code HEAD -- go.mod go.sum
+
+      # Generated Go files are ignored by git and required by the Dockerfile.
+      # Reproduce its pinned generator only in this hosted CI workspace.
+      - name: Generate template Go files
+        run: |
+          go install github.com/a-h/templ/cmd/templ@v0.3.1001
+          "$(go env GOPATH)/bin/templ" generate
+
+      - name: Verify tracked files after generation
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
+        run: git diff --exit-code HEAD
+
+      # Match the existing CGO_ENABLED=1 Dockerfile build, without running it.
+      - name: Compile Linux console packages
+        run: go build ./...
+
+      # These existing tests render ConfigNavbar into io.Pipe and use goquery.
+      # Import review found registration/default initialization, with DB/NATS
+      # connections and session cleanup behind constructors the tests do not call.
+      # Model/Ent test suites and application startup are outside this boundary.
+      - name: Test navigation templates
+        run: go test -count=1 -timeout=2m ./internal/views/admin_views
+
+      - name: Verify modules after validation
+        run: go mod verify
+
+      - name: Verify tracked files after validation, including failed steps
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
+        run: git diff --exit-code HEAD
